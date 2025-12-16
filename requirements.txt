@@ -1,6 +1,6 @@
 fastapi
 uvicorn[standard]
 httpx
-sqlalchemy
+sqlalchemy[asyncio]
 aiosqlite
 python-dotenv

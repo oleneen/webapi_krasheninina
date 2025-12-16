@@ -1,41 +1,48 @@
-from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.middleware.cors import CORSMiddleware
 import time
 import logging
-from pydantic import BaseModel
-import asyncio
+from typing import Optional, List
 
-from sqlalchemy.orm import declarative_base, sessionmaker
-from sqlalchemy import Column, Integer, String, Boolean, create_engine
-
-Base = declarative_base()
-engine = create_engine(
-    "sqlite:///./tasks.db"
+from fastapi import (
+    FastAPI,
+    Request,
+    HTTPException,
+    Depends,
 )
-DBSession = sessionmaker(bind=engine, autoflush = False, autocommit = False)
+from fastapi.middleware.cors import CORSMiddleware
+
+from pydantic import BaseModel
+
+from sqlalchemy import (
+    Column,
+    Integer,
+    String,
+    Boolean,
+    select,
+)
+from sqlalchemy.orm import declarative_base
+from sqlalchemy.ext.asyncio import (
+    create_async_engine,
+    AsyncSession,
+)
+from sqlalchemy.orm import sessionmaker
 
 
-class TaskModel(Base):
-    __tablename__ = "tasks"
-
-    id = Column(Integer, primary_key = True, index = True)
-    title = Column(String)
-    description = Column(String)
-    done = Column(Boolean, default = False)
-
-Base.metadata.create_all(bind=engine)
-
-async def get_db():
-    db = DBSession()
-    try:
-        yield db
-    finally:
-        db.close()
+# =========================
+# ЛОГИРОВАНИЕ
+# =========================
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("req-logger")
 
-app = FastAPI(title="TODO API", version="1.0")
+
+# =========================
+# FASTAPI
+# =========================
+
+app = FastAPI(
+    title="TODO API",
+    version="1.0"
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -45,124 +52,156 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     start_time = time.time()
     logger.info(f"📥 {request.method} {request.url}")
-    
+
     response = await call_next(request)
-    
+
     process_time = time.time() - start_time
     response.headers["X-Process-Time"] = f"{process_time:.4f}s"
-    logger.info(f"{request.method} {request.url} → {response.status_code} | {process_time:.4f}s")
-    
+    logger.info(
+        f"{request.method} {request.url} → {response.status_code} | {process_time:.4f}s"
+    )
+
     return response
+
+
+# =========================
+# DATABASE
+# =========================
+
+DATABASE_URL = "sqlite+aiosqlite:///./tasks.db"
+
+Base = declarative_base()
+
+engine = create_async_engine(
+    DATABASE_URL,
+    echo=False,
+)
+
+AsyncSessionLocal = sessionmaker(
+    engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+)
+
+
+async def get_db() -> AsyncSession:
+    async with AsyncSessionLocal() as session:
+        yield session
+
+
+# =========================
+# MODELS
+# =========================
+
+class TaskModel(Base):
+    __tablename__ = "tasks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String, nullable=False)
+    description = Column(String, nullable=False)
+    done = Column(Boolean, default=False)
+
+
+# =========================
+# SCHEMAS
+# =========================
 
 class TaskCreate(BaseModel):
     title: str
-    description: str 
+    description: str
+
+
+class TaskUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    done: Optional[bool] = None
+
 
 class Task(TaskCreate):
     id: int
-    done: bool = False
-
-class TaskUpdate(BaseModel):
-    title: str
-    description: str
     done: bool
 
-tasks: list[Task] = []
-next_id = 1
+    class Config:
+        from_attributes = True
 
 
-@app.get("/tasks", response_model=list[Task])
-async def get_tasks(db: DBSession = Depends(get_db)):
-    return tasks
+# =========================
+# STARTUP
+# =========================
+
+@app.on_event("startup")
+async def startup():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+
+# =========================
+# CRUD ENDPOINTS
+# =========================
+
+@app.get("/tasks", response_model=List[Task])
+async def get_tasks(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(TaskModel))
+    return result.scalars().all()
+
 
 @app.post("/tasks", response_model=Task, status_code=201)
-async def create_task(task: TaskCreate):
-    global next_id
-    new_task = Task(id=next_id, title=task.title, description=task.description)
-    tasks.append(new_task)
-    next_id += 1
+async def create_task(
+    task: TaskCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    new_task = TaskModel(
+        title=task.title,
+        description=task.description,
+    )
+    db.add(new_task)
+    await db.commit()
+    await db.refresh(new_task)
     return new_task
 
-@app.get("/tasks/{task_id}", response_model=Task)
-async def get_task(task_id: int):
-    for t in tasks:
-        if t.id == task_id:
-            return t
-    raise HTTPException(status_code=404, detail="Task not found")
 
-@app.put("/tasks/{task_id}", response_model=Task)
-async def update_task(task_id: int, updated: TaskUpdate):
-    for idx, t in enumerate(tasks):
-        if t.id == task_id:
-            tasks[idx] = Task(
-                id=t.id,
-                title=updated.title,
-                description=updated.description,
-                done=updated.done
-            )
-            return tasks[idx]
-    raise HTTPException(status_code=404, detail="Task not found")
+@app.get("/tasks/{task_id}", response_model=Task)
+async def get_task(
+    task_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    task = await db.get(TaskModel, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task
+
+
+@app.patch("/tasks/{task_id}", response_model=Task)
+async def update_task(
+    task_id: int,
+    updated: TaskUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    task = await db.get(TaskModel, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    for field, value in updated.dict(exclude_unset=True).items():
+        setattr(task, field, value)
+
+    await db.commit()
+    await db.refresh(task)
+    return task
+
 
 @app.delete("/tasks/{task_id}", status_code=204)
-async def delete_task(task_id: int):
-    for t in tasks:
-        if t.id == task_id:
-            tasks.remove(t)
-            return
-    raise HTTPException(status_code=404, detail="Task not found")
+async def delete_task(
+    task_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    task = await db.get(TaskModel, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
 
-@app.get("/async_task()")
-async def async_task():
-    await asyncio.sleep(5)
-    return {"message": "ok"}
-
-
-from fastapi import BackgroundTasks
-
-@app.get("/background_task")
-async def background_task(background_task: BackgroundTasks):
-    def slow_time():
-        import time
-        time.sleep(10)
-        print("OK!!!!")
-        print("OK!!!!")
-        print("OK!!!!")
-        print("OK!!!!")
-        print("OK!!!!")
-
-    background_task.add_task(slow_time)
-    return {"message": "task started"}
-
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
-
-io_executor = ThreadPoolExecutor(max_workers=2)
-
-cpu_executor = ProcessPoolExecutor(max_workers=2)
-
-def blocking_io_task():
-    import time
-    time.sleep(6)
-    return "ok"
-
-@app.get("/thread_pool_sleep")
-async def thread_pool_sleep():
-    loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(io_executor, blocking_io_task)
-    return {"message": result}
-
-def heavy_func(n: int):
-    result = 0
-    for i in range(n):
-        result += i * i
-    "foo" * n
-    return result
-
-@app.get("/cpu_task")
-async def cpu_task(n: int = 10_000_000):
-    loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(cpu_executor, heavy_func, n)
-    return {"message": result}
+    await db.delete(task)
+    await db.commit()
