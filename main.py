@@ -1,17 +1,20 @@
 import time
 import logging
+import asyncio
 from typing import Optional, List
+
+import httpx
 
 from fastapi import (
     FastAPI,
     Request,
     HTTPException,
     Depends,
+    BackgroundTasks,
+    WebSocket,
 )
 from fastapi.middleware.cors import CORSMiddleware
-
 from pydantic import BaseModel
-
 from sqlalchemy import (
     Column,
     Integer,
@@ -26,18 +29,12 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import sessionmaker
 
-
-# =========================
 # ЛОГИРОВАНИЕ
-# =========================
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("req-logger")
 
-
-# =========================
 # FASTAPI
-# =========================
 
 app = FastAPI(
     title="TODO API",
@@ -51,7 +48,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
@@ -68,10 +64,7 @@ async def log_requests(request: Request, call_next):
 
     return response
 
-
-# =========================
-# DATABASE
-# =========================
+# DATABASE (ASYNC)
 
 DATABASE_URL = "sqlite+aiosqlite:///./tasks.db"
 
@@ -93,10 +86,7 @@ async def get_db() -> AsyncSession:
     async with AsyncSessionLocal() as session:
         yield session
 
-
-# =========================
 # MODELS
-# =========================
 
 class TaskModel(Base):
     __tablename__ = "tasks"
@@ -106,62 +96,100 @@ class TaskModel(Base):
     description = Column(String, nullable=False)
     done = Column(Boolean, default=False)
 
-
-# =========================
 # SCHEMAS
-# =========================
 
 class TaskCreate(BaseModel):
     title: str
     description: str
-
 
 class TaskUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     done: Optional[bool] = None
 
-
 class Task(TaskCreate):
     id: int
     done: bool
-
     class Config:
         from_attributes = True
 
+# WEBSOCKET MANAGER
 
-# =========================
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: dict):
+        for connection in self.active_connections:
+            await connection.send_json(message)
+
+manager = ConnectionManager()
+
+# BACKGROUND TASKS
+
+async def generate_tasks(session: AsyncSession, count: int = 5):
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            "https://jsonplaceholder.typicode.com/todos"
+        )
+        data = response.json()[:count]
+
+    for item in data:
+        task = TaskModel(
+            title=item["title"],
+            description="generated",
+            done=item["completed"]
+        )
+        session.add(task)
+
+    await session.commit()
+
+async def periodic_task_generator():
+    while True:
+        await asyncio.sleep(60)
+        async with AsyncSessionLocal() as session:
+            await generate_tasks(session, count=1)
+
 # STARTUP
-# =========================
 
 @app.on_event("startup")
 async def startup():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
+    # asyncio.create_task(periodic_task_generator())
 
-# =========================
 # CRUD ENDPOINTS
-# =========================
 
 @app.get("/tasks", response_model=List[Task])
 async def get_tasks(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(TaskModel))
     return result.scalars().all()
 
-
 @app.post("/tasks", response_model=Task, status_code=201)
 async def create_task(
     task: TaskCreate,
     db: AsyncSession = Depends(get_db),
 ):
-    new_task = TaskModel(
-        title=task.title,
-        description=task.description,
-    )
+    new_task = TaskModel(**task.dict())
     db.add(new_task)
     await db.commit()
     await db.refresh(new_task)
+
+    await manager.broadcast({
+        "event": "task_created",
+        "task_id": new_task.id,
+        "title": new_task.title,
+    })
+
     return new_task
 
 
@@ -191,6 +219,12 @@ async def update_task(
 
     await db.commit()
     await db.refresh(task)
+
+    await manager.broadcast({
+        "event": "task_updated",
+        "task_id": task.id,
+    })
+
     return task
 
 
@@ -205,3 +239,29 @@ async def delete_task(
 
     await db.delete(task)
     await db.commit()
+
+    await manager.broadcast({
+        "event": "task_deleted",
+        "task_id": task_id,
+    })
+
+# MANUAL BACKGROUND RUN
+
+@app.post("/task-generator/run")
+async def run_task_generator(
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    background_tasks.add_task(generate_tasks, db)
+    return {"status": "started"}
+
+# WEBSOCKET
+
+@app.websocket("/ws/tasks")
+async def ws_tasks(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except:
+        manager.disconnect(websocket)
