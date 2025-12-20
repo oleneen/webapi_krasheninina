@@ -52,7 +52,7 @@ app.add_middleware(
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     start_time = time.time()
-    logger.info(f"📥 {request.method} {request.url}")
+    logger.info(f"{request.method} {request.url}")
 
     response = await call_next(request)
 
@@ -165,7 +165,7 @@ async def startup():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    # asyncio.create_task(periodic_task_generator())
+    asyncio.create_task(periodic_task_generator())
 
 # CRUD ENDPOINTS
 
