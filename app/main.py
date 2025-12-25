@@ -10,6 +10,8 @@ from .nats_client.handlers import subscribe_to_nats
 from .tasks.background import periodic_fetch_task
 from .api.routes import router as api_router
 from .ws.manager import manager
+import logging
+logging.basicConfig(level=logging.INFO)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
