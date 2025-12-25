@@ -4,3 +4,6 @@ httpx
 sqlalchemy[asyncio]
 aiosqlite
 python-dotenv
+pydantic
+pydantic-settings
+nats-py>=2.7.2
