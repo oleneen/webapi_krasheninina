@@ -7,15 +7,16 @@ import logging
 logger = logging.getLogger("nats_handler")
 
 async def message_handler(msg):
-    try:
-        data = json.loads(msg.data.decode())
-        logger.info(f"NATS message received: {data}")
-        await manager.broadcast({
-            "event": "new_rate",
-            "payload": data
-        })
-    except Exception as e:
-        logger.error(f"Error in message_handler: {e}")
+    data = json.loads(msg.data.decode())
+    logger.info(f"NATS message received: {data}")
+
+    event_type = data.get("event", "new_rate")
+    payload = {k: v for k, v in data.items() if k != "event"}
+
+    await manager.broadcast({
+        "event": event_type,
+        "payload": payload
+    })
 
 async def publish_rate_event(rate_data: Dict[str, Any]):
     nc = await get_nats_client()

@@ -19,6 +19,18 @@ async def get_rates(char_code: str = None, db: AsyncSession = Depends(get_db)):
     result = await db.execute(query)
     return result.scalars().all()
 
+@router.get("/{char_code}", response_model=list[CurrencyRateOut])
+async def get_rates_by_char_code(
+    char_code: str,
+    db: AsyncSession = Depends(get_db)
+):
+    query = select(CurrencyRate).where(CurrencyRate.char_code == char_code)
+    result = await db.execute(query)
+    rates = result.scalars().all()
+    if not rates:
+        raise HTTPException(status_code=404, detail="No rates found for this currency")
+    return rates
+
 @router.get("/{rate_id}", response_model=CurrencyRateOut)
 async def get_rate(rate_id: int, db: AsyncSession = Depends(get_db)):
     rate = await db.get(CurrencyRate, rate_id)
@@ -68,6 +80,22 @@ async def update_rate(
     })
 
     return db_rate
+
+@router.delete("/{rate_id}", status_code=204)
+async def delete_rate(rate_id: int, db: AsyncSession = Depends(get_db)):
+    db_rate = await db.get(CurrencyRate, rate_id)
+    if not db_rate:
+        raise HTTPException(status_code=404, detail="Rate not found")
+
+    await db.delete(db_rate)
+    await db.commit()
+
+    await publish_rate_event({
+        "event": "rate_deleted",
+        "id": db_rate.id,
+        "char_code": db_rate.char_code,
+        "date": db_rate.date.isoformat()
+    })
 
 @router.post("/tasks/run")
 async def run_fetch_task(background_tasks: BackgroundTasks):

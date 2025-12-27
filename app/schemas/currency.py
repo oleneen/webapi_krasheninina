@@ -3,11 +3,11 @@ from pydantic import BaseModel, Field
 from typing import Optional
 
 class CurrencyRateCreate(BaseModel):
-    char_code: str = Field(example="RUB")
-    num_code: str = Field(example="643")
-    nominal: int = Field(example=1000)
-    name: str = Field(example="Русский Рубль")
-    value: float = Field(example=12.84)
+    char_code: str = Field(example="BTC")
+    num_code: str = Field(example="960")
+    nominal: int = Field(example=1)
+    name: str = Field(example="Биткоин")
+    value: float = Field(example=6842370.50)
     date: date
 
 class CurrencyRateOut(CurrencyRateCreate):
